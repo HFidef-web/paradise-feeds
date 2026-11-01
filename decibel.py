@@ -121,7 +121,7 @@ def derive_vendor(offer):
 
 
 def part_code(offer):
-    """Код запчастини лише якщо артикул уже є у фіді. Id офера не підставляється."""
+    """Артикул, якщо він уже є у фіді (тег або характеристика)."""
     for tag in PART_TAGS:
         value = text_of(offer.find(tag))
         if value:
@@ -130,6 +130,31 @@ def part_code(offer):
         if (param.get('name') or '').strip().lower() in PART_PARAMS and text_of(param):
             return text_of(param)
     return ''
+
+
+QTY_RE = re.compile(r'\(\s*\d+\s*шт\.?\s*\)', re.I)
+
+
+def name_tail(offer, vendor):
+    """Частина назви після бренду, без «(2 шт.)»."""
+    name = text_of(offer.find('name'))
+    m = re.search(r'(?<!\w)' + re.escape(vendor) + r'(?!\w)', name, re.I) if vendor else None
+    tail = name[m.end():] if m else ''
+    return ' '.join(QTY_RE.sub(' ', tail).split())
+
+
+def model_code(offer, vendor):
+    """Модель з назви: перший токен з цифрою після бренду (MNA-70.4, PM2-84, FHA11).
+    Якщо токен починається з цифри або короткий (80A, H4, S8, RC3) — разом із
+    попереднім словом (MAF 80A, AF 250, Shine H4). Без цифр — увесь хвіст назви
+    (E-Tape, Test Bag). Порожньо — id офера."""
+    tokens = name_tail(offer, vendor).split()
+    for i, tok in enumerate(tokens):
+        if re.search(r'\d', tok):
+            if i > 0 and (tok[0].isdigit() or len(tok) <= 3):
+                return f'{tokens[i - 1]} {tok}'
+            return tok
+    return ' '.join(tokens) or (offer.get('id') or '')
 
 
 def commercial(offer):
@@ -198,6 +223,9 @@ def main():
     vendor_filled = 0
     vendor_added = 0
     part_filled = 0
+    code_derived = 0
+    codes = {}
+    derived = []
     for offer in offers:
         cid = text_of(offer.find('categoryId'))
         rule = match_rule(rules, cid, offer.findtext('name') or '')
@@ -219,14 +247,28 @@ def main():
             if upsert_param(offer, 'Виробник', vendor):
                 vendor_filled += 1
         code = part_code(offer)
-        # Не брати щойно відсутній код з id. vendorCode/article мали бути в джерелі.
-        if code and code != (offer.get('id') or ''):
-            if upsert_param(offer, 'Код запчастини', code):
-                part_filled += 1
-        elif code and any(text_of(offer.find(tag)) == code for tag in PART_TAGS):
-            # Артикул у фіді збігся з id — це все одно артикул постачальника, його передаємо.
-            if upsert_param(offer, 'Код запчастини', code):
-                part_filled += 1
+        if not code:
+            # У джерелі немає артикула: беремо модель з назви (fallback — id офера).
+            code = model_code(offer, vendor)
+            code_derived += 1
+            derived.append(offer)
+        codes[offer.get('id')] = (vendor, code)
+
+    # Короткий код не унікальний у бренду (V1 White/Red, MAD/MAX PM2-64, NFL C10W 31/36 mm)
+    # — для таких беремо всю назву після бренду.
+    seen = {}
+    for vendor, code in codes.values():
+        seen[(vendor.lower(), code.lower())] = seen.get((vendor.lower(), code.lower()), 0) + 1
+    for offer in derived:
+        vendor, code = codes[offer.get('id')]
+        if seen[(vendor.lower(), code.lower())] > 1:
+            codes[offer.get('id')] = (vendor, name_tail(offer, vendor) or code)
+    for offer in offers:
+        code = codes[offer.get('id')][1]
+        if upsert_param(offer, 'Код запчастини', code):
+            part_filled += 1
+        if not text_of(offer.find('vendorCode')):
+            upsert_text(offer, 'vendorCode', code, 'vendor')
 
     drop_empty_categories(shop, offers)
 
@@ -244,6 +286,14 @@ def main():
     ]
     if missing_portal:
         sys.exit(f'offers without portal category: {len(missing_portal)}')
+    def has_param(o, name):
+        return any((p.get('name') or '').strip() == name and text_of(p) for p in o.findall('param'))
+    missing_params = [
+        o.get('id') for o in offers
+        if not has_param(o, 'Виробник') or not has_param(o, 'Код запчастини')
+    ]
+    if missing_params:
+        sys.exit(f'offers without Виробник/Код запчастини: {missing_params[:20]}')
 
     os.makedirs(os.path.join(ROOT, 'public'), exist_ok=True)
     ET.indent(root, space='  ')
@@ -297,7 +347,8 @@ def main():
         f'needs_check: {needs_check} '
         f'vendor_param: {vendor_filled} '
         f'vendor_tag_added: {vendor_added} '
-        f'part_code_param: {part_filled}'
+        f'part_code_param: {part_filled} '
+        f'part_code_from_name: {code_derived}'
     )
 
 
