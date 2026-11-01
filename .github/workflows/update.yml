@@ -1,5 +1,7 @@
 name: update
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '0 */2 * * *'
   workflow_dispatch:
@@ -19,6 +21,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python filter.py
+      - run: python decibel.py
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
