@@ -11,8 +11,11 @@ import xml.etree.ElementTree as ET
 import urllib.request
 
 URL = 'https://api.decibel.com.ua/feed/drop_uk.xml'
-MIN_OFFERS = 300
+MIN_OFFERS = 250
 ROOT = os.path.dirname(os.path.abspath(__file__))
+# Бренды, которых нет в прайсе Decibel. Оферы с таким <vendor> не попадают в фид.
+# Сравнение без учёта регистра и крайних пробелов — список удобно править.
+EXCLUDED_VENDORS = {'KiurLab', 'SWAG', 'Deaf Bonce', 'AVATAR'}
 MAP_PATH = os.path.join(ROOT, 'decibel_categories.csv')
 # Довші назви раніше, щоб «JL Audio» не розпався на коротший токен.
 BRANDS = (
@@ -139,6 +142,28 @@ def commercial(offer):
     )
 
 
+def is_excluded(offer):
+    vendor = text_of(offer.find('vendor')).lower()
+    return vendor in {name.strip().lower() for name in EXCLUDED_VENDORS}
+
+
+def drop_empty_categories(shop, offers):
+    """Удаляет <category>, на которые не ссылается ни один оставшийся офер. Родителей сохраняет."""
+    cats = shop.find('categories')
+    if cats is None:
+        return
+    parent = {c.get('id'): c.get('parentId') for c in cats}
+    need = {text_of(o.find('categoryId')) for o in offers}
+    need.discard('')
+    for cid in list(need):
+        while parent.get(cid):
+            cid = parent[cid]
+            need.add(cid)
+    for cat in list(cats):
+        if cat.get('id') not in need:
+            cats.remove(cat)
+
+
 def main():
     rules = load_rules(MAP_PATH)
     try:
@@ -151,12 +176,22 @@ def main():
     offers_el = shop.find('offers') if shop is not None else None
     if offers_el is None:
         sys.exit('no offers element')
+    source_offers = list(offers_el)
+    src_all_ids = [o.get('id') for o in source_offers]
+    if any(not i for i in src_all_ids) or len(src_all_ids) != len(set(src_all_ids)):
+        sys.exit('source offer ids are missing or not unique')
+    # Сначала отсекаем бренды вне прайса: проверка категории портала их не касается.
+    excluded = [o for o in source_offers if is_excluded(o)]
+    for offer in excluded:
+        offers_el.remove(offer)
     offers = list(offers_el)
     if len(offers) < MIN_OFFERS:
         sys.exit(f'too few offers: {len(offers)}')
+    # Оставшиеся id — это id источника без исключённых брендов, без префикса.
     src_ids = [o.get('id') for o in offers]
-    if any(not i for i in src_ids) or len(src_ids) != len(set(src_ids)):
-        sys.exit('source offer ids are missing or not unique')
+    kept_source_ids = [o.get('id') for o in source_offers if not is_excluded(o)]
+    if src_ids != kept_source_ids:
+        sys.exit('kept offer ids differ from source minus excluded vendors')
     before = [commercial(o) for o in offers]
 
     needs_check = 0
@@ -193,6 +228,8 @@ def main():
             if upsert_param(offer, 'Код запчастини', code):
                 part_filled += 1
 
+    drop_empty_categories(shop, offers)
+
     after = [commercial(o) for o in offers]
     out_ids = [o.get('id') for o in offers]
     if out_ids != src_ids:
@@ -212,14 +249,34 @@ def main():
     ET.indent(root, space='  ')
     out_path = os.path.join(ROOT, 'public', 'decibel_prom.xml')
     ET.ElementTree(root).write(out_path, encoding='UTF-8', xml_declaration=True)
+    csv_path = os.path.join(ROOT, 'public', 'decibel_excluded.csv')
+    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as fh:
+        writer = csv.writer(fh, delimiter=';')
+        writer.writerow(['id', 'vendor', 'name'])
+        for offer in excluded:
+            writer.writerow([
+                offer.get('id') or '',
+                text_of(offer.find('vendor')),
+                text_of(offer.find('name')),
+            ])
 
-    # Повторна перевірка записаного файла: множина id і ціни = джерело.
+    # Повторная проверка записанного файла: id и цены = источник без исключённых брендов.
     saved = ET.parse(out_path).getroot()
     saved_offers = list(saved.find('shop').find('offers'))
     if [o.get('id') for o in saved_offers] != src_ids:
         sys.exit('written offer ids differ from source')
     if [commercial(o) for o in saved_offers] != before:
         sys.exit('written commercial fields differ from source')
+    banned = {name.strip().lower() for name in EXCLUDED_VENDORS}
+    if any(text_of(o.find('vendor')).lower() in banned for o in saved_offers):
+        sys.exit('written feed still contains an excluded vendor')
+    with open(csv_path, 'rb') as fh:
+        if not fh.read(3) == b'\xef\xbb\xbf':
+            sys.exit('excluded csv has no utf-8 bom')
+    with open(csv_path, encoding='utf-8-sig', newline='') as fh:
+        rows = list(csv.reader(fh, delimiter=';'))
+    if rows[:1] != [['id', 'vendor', 'name']] or [r[0] for r in rows[1:]] != [o.get('id') for o in excluded]:
+        sys.exit('excluded csv does not match dropped offers')
 
     index = os.path.join(ROOT, 'public', 'index.html')
     with open(index, 'w', encoding='utf-8') as fh:
@@ -230,10 +287,12 @@ def main():
             '<ul>\n'
             '<li><a href="cyclone_prom.xml">cyclone_prom.xml</a> — Cyclone</li>\n'
             '<li><a href="decibel_prom.xml">decibel_prom.xml</a> — Decibel</li>\n'
+            '<li><a href="decibel_excluded.csv">decibel_excluded.csv</a> — снятые оферы Decibel</li>\n'
             '</ul>\n'
         )
     print(
         f'offers: {len(offers)} '
+        f'excluded: {len(excluded)} '
         f'portal: {len(offers)} '
         f'needs_check: {needs_check} '
         f'vendor_param: {vendor_filled} '
