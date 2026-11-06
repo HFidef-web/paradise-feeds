@@ -1,5 +1,6 @@
 # Paradise.SPL: фильтр фида Cyclone для Prom.ua (только stdlib)
 import xml.etree.ElementTree as ET, urllib.request, re, os, sys
+import enrichment
 URL = 'https://cyclone.ua/rss/cyclone_prom.xml'; MAX = 510
 IDS = set("""
 114256,114265,114277,114286,114292,114300,114301,114316,114322,114328,114334,114340,114346,114352,114355,11435
@@ -65,7 +66,8 @@ for c in list(need):
     while par.get(c): c = par[c]; need.add(c)
 for c in list(cats):
     if c.get('id') not in need: cats.remove(c)
+enrich_stats = enrichment.apply_feed(root, 'cyclone')
 os.makedirs('public', exist_ok=True); ET.indent(root, space='  ')
 ET.ElementTree(root).write('public/cyclone_prom.xml', encoding='UTF-8', xml_declaration=True)
 open('public/index.html', 'w').write('<a href="cyclone_prom.xml">cyclone_prom.xml</a>')
-print('offers:', len(keep), 'available:', sum(o.get('available') == 'true' for o in keep), 'new:', len(keep) - len(IDS & {o.get('id')[4:] for o in keep}))
+print('offers:', len(keep), 'available:', sum(o.get('available') == 'true' for o in keep), 'new:', len(keep) - len(IDS & {o.get('id')[4:] for o in keep}), 'params:', enrich_stats['params_added'], 'portal:', enrich_stats['portal_ids'])

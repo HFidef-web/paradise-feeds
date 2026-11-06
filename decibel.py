@@ -10,6 +10,8 @@ import sys
 import xml.etree.ElementTree as ET
 import urllib.request
 
+import enrichment
+
 URL = 'https://api.decibel.com.ua/feed/drop_uk.xml'
 MIN_OFFERS = 250
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -270,6 +272,9 @@ def main():
         if not text_of(offer.find('vendorCode')):
             upsert_text(offer, 'vendorCode', code, 'vendor')
 
+    # Характеристики і точкові категорії з overlay. Існуючі ціни й параметри не чіпає.
+    enrich_stats = enrichment.apply_feed(root, 'decibel')
+
     drop_empty_categories(shop, offers)
 
     after = [commercial(o) for o in offers]
@@ -348,7 +353,9 @@ def main():
         f'vendor_param: {vendor_filled} '
         f'vendor_tag_added: {vendor_added} '
         f'part_code_param: {part_filled} '
-        f'part_code_from_name: {code_derived}'
+        f'part_code_from_name: {code_derived} '
+        f'enrich_params: {enrich_stats["params_added"]} '
+        f'enrich_portal: {enrich_stats["portal_ids"]}'
     )
 
 
