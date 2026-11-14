@@ -69,5 +69,6 @@ for c in list(cats):
 enrich_stats = enrichment.apply_feed(root, 'cyclone')
 os.makedirs('public', exist_ok=True); ET.indent(root, space='  ')
 ET.ElementTree(root).write('public/cyclone_prom.xml', encoding='UTF-8', xml_declaration=True)
+enrichment.wrap_html_descriptions_in_cdata('public/cyclone_prom.xml')
 open('public/index.html', 'w').write('<a href="cyclone_prom.xml">cyclone_prom.xml</a>')
 print('offers:', len(keep), 'available:', sum(o.get('available') == 'true' for o in keep), 'new:', len(keep) - len(IDS & {o.get('id')[4:] for o in keep}), 'params:', enrich_stats['params_added'], 'portal:', enrich_stats['portal_ids'])
