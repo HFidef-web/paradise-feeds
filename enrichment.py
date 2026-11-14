@@ -22,6 +22,9 @@ CYCLONE_GROUP_PORTAL = frozenset({
     '12020603',  # Додаткові, протитуманні фари
 })
 SKIPPED_TAGS = frozenset({'param', 'portal_category_id', 'portal_category_url'})
+TEXT_OVERRIDE_TAGS = (
+    'name', 'name_ua', 'keywords', 'keywords_ua', 'description', 'description_ua',
+)
 
 
 def _exit(message):
@@ -64,11 +67,12 @@ def require_portal(cats, portal_id):
     return rec
 
 
-def protected_signature(offer):
+def protected_signature(offer, extra_skip=()):
     attrs = tuple(sorted(offer.attrib.items()))
     children = []
+    skip = SKIPPED_TAGS.union(extra_skip)
     for el in list(offer):
-        if el.tag in SKIPPED_TAGS:
+        if el.tag in skip:
             continue
         kids = tuple((c.tag, c.text, tuple(sorted(c.attrib.items()))) for c in list(el))
         children.append((el.tag, el.text, tuple(sorted(el.attrib.items())), kids))
@@ -92,6 +96,28 @@ def set_child(parent, tag, value):
     el = ET.Element(tag)
     el.text = value
     parent.append(el)
+
+
+def apply_text_overrides(offer, rec):
+    """Накласти назву, опис і пошукові запити з overlay, якщо ключ задано."""
+    oid = offer.get('id')
+    applied = []
+    if not isinstance(rec, dict):
+        return applied
+    for tag in TEXT_OVERRIDE_TAGS:
+        if tag not in rec:
+            continue
+        value = rec.get(tag)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            _exit(f'offer {oid} overlay {tag} is not a string')
+        value = value.strip()
+        if not value:
+            continue
+        set_child(offer, tag, value)
+        applied.append(tag)
+    return applied
 
 
 def _positive(name, value, unit, oid):
@@ -239,4 +265,47 @@ def apply_feed(root, feed):
         if wanted and (offer.findtext('portal_category_id') or '').strip() != wanted:
             _exit(f'offer {offer.get("id")} lost portal category {wanted}')
 
+    mid_notext = [protected_signature(o, extra_skip=TEXT_OVERRIDE_TAGS) for o in after]
+    for offer in after:
+        rec = overlay.get(offer.get('id') or '') or {}
+        apply_text_overrides(offer, rec)
+    if [o.get('id') for o in offers_el] != before_ids:
+        _exit('offer ids or order changed after text overrides')
+    if [protected_signature(o, extra_skip=TEXT_OVERRIDE_TAGS) for o in after] != mid_notext:
+        _exit('a price, photo, quantity or other protected field changed while applying text overrides')
+    for offer in after:
+        rec = overlay.get(offer.get('id') or '') or {}
+        if not rec:
+            continue
+        for tag in TEXT_OVERRIDE_TAGS:
+            if tag not in rec or rec.get(tag) is None or not isinstance(rec.get(tag), str):
+                continue
+            wanted_text = rec[tag].strip()
+            if not wanted_text:
+                continue
+            have = (offer.findtext(tag) or '').strip()
+            if have != wanted_text:
+                _exit(f'offer {offer.get("id")} lost text override {tag}')
+
     return {'params_added': params_added, 'portal_ids': portal_ids, 'offers': len(after)}
+
+
+def wrap_html_descriptions_in_cdata(path, tags=('description_ua', 'description')):
+    """After ElementTree.write, wrap HTML descriptions in CDATA. Plain-text descriptions stay untouched."""
+    import html
+    import re
+    xml = open(path, encoding='utf-8').read()
+    pattern = r'<(' + '|'.join(re.escape(t) for t in tags) + r')>(.*?)</\1>'
+
+    def repl(match):
+        tag, body = match.group(1), match.group(2)
+        if '&lt;' not in body:
+            return match.group(0)
+        text = html.unescape(body)
+        if ']]>' in text:
+            _exit(f'CDATA terminator in <{tag}> of {path}')
+        return f'<{tag}><![CDATA[{text}]]></{tag}>'
+
+    new, n = re.subn(pattern, repl, xml, flags=re.S)
+    open(path, 'w', encoding='utf-8').write(new)
+    return n
